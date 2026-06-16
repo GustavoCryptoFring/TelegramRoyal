@@ -1,0 +1,19 @@
+[Unit]
+Description=Rumble Royale Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Замени USER на своего пользователя, а путь — на папку с ботом
+WorkingDirectory=/home/USER/rumble_bot
+ExecStart=/home/USER/rumble_bot/venv/bin/python /home/USER/rumble_bot/bot.py
+User=USER
+Restart=always
+RestartSec=5
+
+# Токен бот возьмёт из файла .env в WorkingDirectory автоматически.
+# (Либо раскомментируй строку ниже и впиши токен прямо тут.)
+# Environment=BOT_TOKEN=123456:ABC...
+
+[Install]
+WantedBy=multi-user.target
