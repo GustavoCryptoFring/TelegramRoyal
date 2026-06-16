@@ -120,19 +120,39 @@ async def on_my_chat_member(ev: ChatMemberUpdated) -> None:
 
 # --- Admin flow (private chat) -----------------------------------------------
 
+def is_owner(user_id: int) -> bool:
+    """Owner-only control. If OWNER_ID is unset (0), the bot is open (so you
+    can discover your id on the first /start)."""
+    return config.OWNER_ID == 0 or user_id == config.OWNER_ID
+
+
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(m: Message, state: FSMContext) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer("🔒 Это приватный бот.")
+        return
     await state.clear()
-    await m.answer(welcome_text(), reply_markup=kb_newgame())
+    text = welcome_text()
+    if config.OWNER_ID == 0:
+        text += (f"\n\n🔑 Твой ID: <code>{m.from_user.id}</code>\n"
+                 f"Чтобы бот отвечал только тебе, добавь "
+                 f"<code>OWNER_ID={m.from_user.id}</code> в файл .env и перезапусти бота.")
+    await m.answer(text, reply_markup=kb_newgame())
 
 
 @router.message(Command("newgame"), F.chat.type == ChatType.PRIVATE)
 async def cmd_newgame(m: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer("🔒 Это приватный бот.")
+        return
     await show_chat_picker(bot, m.from_user.id, m, state)
 
 
 @router.callback_query(F.data == "newgame", F.message.chat.type == ChatType.PRIVATE)
 async def cb_newgame(c: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_owner(c.from_user.id):
+        await c.answer("🔒 Это приватный бот.", show_alert=True)
+        return
     await c.answer()
     await show_chat_picker(bot, c.from_user.id, c.message, state)
 
@@ -165,6 +185,9 @@ async def show_chat_picker(bot: Bot, user_id: int, msg: Message, state: FSMConte
 
 @router.callback_query(F.data.startswith("pick:"), NewGame.choosing_chat)
 async def cb_pick(c: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner(c.from_user.id):
+        await c.answer("🔒 Это приватный бот.", show_alert=True)
+        return
     chat_id = int(c.data.split(":", 1)[1])
     if chat_id in games:
         await c.answer("В этом чате уже идёт игра.", show_alert=True)
@@ -182,6 +205,9 @@ async def cb_pick(c: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(NewGame.entering_minutes, F.chat.type == ChatType.PRIVATE)
 async def on_minutes(m: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer("🔒 Это приватный бот.")
+        return
     txt = (m.text or "").strip()
     if not txt.isdigit():
         await m.answer("Нужно целое число минут, например: 5")
