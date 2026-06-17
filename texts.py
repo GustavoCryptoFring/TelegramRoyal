@@ -1,17 +1,15 @@
-"""English text: kill/accident/revive phrase pools + rendering helpers.
+"""English text: kill/accident/revive/flavor phrase pools + rendering.
 
-Phrases use present tense so they read cleanly regardless of the player's
-gender. A player is only "tagged" (clickable mention that pings them) when
-they die or revive; in all other cases their name is shown in bold without a
-ping, to avoid spamming notifications.
+A player is only "tagged" (clickable mention that pings them) when they die or
+revive. Killers, survivors and flavor lines use plain bold names — no ping.
 """
 from __future__ import annotations
 
 import html
 import random
 
-from game import (AccidentEvent, DoubleKillEvent, GameResult, KillEvent,
-                  Player, ReviveEvent)
+from game import (AccidentEvent, DoubleKillEvent, FlavorEvent, GameResult,
+                  KillEvent, Player, ReviveEvent)
 
 
 def esc(text: str) -> str:
@@ -47,6 +45,12 @@ KILL_PHRASES = [
     "🦈 {killer} feeds {victim} to a hungry shark.",
     "🛡 {killer} breaks {victim}'s defense and ends the fight.",
     "🤺 {killer} outduels {victim} in close combat.",
+    "💀 {killer} simply had faster fingers than {victim}.",
+    "🌊 {killer} throws {victim} right off a cliff.",
+    "😱 {killer} takes out {victim} in a truly shocking way.",
+    "🔪 {killer} backstabs {victim} in their sleep.",
+    "🍽 {killer} finishes off {victim} and doesn't look back.",
+    "🦴 {killer} bludgeons {victim} with someone else's severed leg.",
 ]
 
 DOUBLE_PHRASES = [
@@ -67,6 +71,12 @@ ACCIDENT_PHRASES = [
     "🌩 A random bolt of lightning strikes {victim}.",
     "🪨 An avalanche buries {victim}.",
     "🤡 {victim} gets caught in their own trap.",
+    "🧗 {victim} speedily adventures down a cliff.",
+    "🐶 {victim} is killed by a surprisingly vicious puppy.",
+    "🐴 {victim} tries to ride a wild horse and breaks their neck.",
+    "➗ {victim} tries to divide by zero and reality folds in.",
+    "🌊 {victim} misjudges the depth of the water and dives in head-first.",
+    "🍲 {victim} dies of food poisoning. That's unfortunate.",
 ]
 
 REVIVE_PHRASES = [
@@ -74,11 +84,31 @@ REVIVE_PHRASES = [
     "💉 {victim} finds a medkit and miraculously revives.",
     "🧟 {victim} refuses to die and gets back up!",
     "🔆 A flash of light — and {victim} is back in the game!",
+    "💪 {victim} is back in the game and ready to rumble!",
+]
+
+FLAVOR_PHRASES = [
+    "🌷 {p} stops to smell the flowers.",
+    "🫐 {p} finds some edible berries.",
+    "🎣 {p} finds a lake and sets up camp.",
+    "🦌 {p} successfully hunts a deer!",
+    "🪤 {p} sets traps for food, but catches nothing.",
+    "🌲 {p} has a calm day wandering through the forest.",
+    "🎁 {p} receives food and water from a mysterious sponsor.",
+    "🧘 {p} meditates under a waterfall.",
+    "🗡 {p} sharpens a piece of bone into a blade.",
+    "👂 {p} hears footsteps nearby and freezes.",
+    "🔥 {p} builds a campfire and keeps watch.",
+    "🌳 {p} climbs a tree to scout the area.",
+    "💤 {p} takes a nap in a hidden spot.",
+    "📦 {p} discovers an abandoned supply crate.",
+    "🌧 {p} waits out the rain under a ledge.",
+    "🍞 {p} wakes up to find a small package of food beside them.",
 ]
 
 
 def render_event(ev, players: dict[int, Player], rng: random.Random) -> str:
-    # Only dying/reviving players get a ping (tag); others are plain bold.
+    # Only dying/reviving players get a ping (tag); everyone else is plain bold.
     if isinstance(ev, KillEvent):
         return rng.choice(KILL_PHRASES).format(
             killer=plain(players[ev.killer_id]), victim=tag(players[ev.victim_id]))
@@ -91,6 +121,8 @@ def render_event(ev, players: dict[int, Player], rng: random.Random) -> str:
         return rng.choice(ACCIDENT_PHRASES).format(victim=tag(players[ev.victim_id]))
     if isinstance(ev, ReviveEvent):
         return rng.choice(REVIVE_PHRASES).format(victim=tag(players[ev.player_id]))
+    if isinstance(ev, FlavorEvent):
+        return rng.choice(FLAVOR_PHRASES).format(p=plain(players[ev.player_id]))
     return ""
 
 
