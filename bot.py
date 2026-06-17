@@ -64,6 +64,14 @@ class NewGame(StatesGroup):
     entering_delay = State()
 
 
+class Sim(StatesGroup):
+    entering_count = State()
+    entering_delay = State()
+
+
+SIM_MAX_PLAYERS = 200
+
+
 # --- UI text / keyboards -----------------------------------------------------
 
 def welcome_text() -> str:
@@ -80,22 +88,19 @@ def welcome_text() -> str:
 
 def kb_newgame() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 New game", callback_data="newgame")]
+        [InlineKeyboardButton(text="🎮 New game", callback_data="newgame")],
+        [InlineKeyboardButton(text="🧪 Test simulation", callback_data="sim")],
     ])
 
 
 def join_text(s: Session, finished: bool = False) -> str:
-    if s.players:
-        plist = "\n".join(f"• {texts.plain(p)}" for p in s.players.values())
-    else:
-        plist = "<i>No one has joined yet.</i>"
     head = "⚔️ <b>RUMBLE ROYALE</b> ⚔️\n\n"
     if finished:
         status = "🔒 Joining closed! The battle begins...\n\n"
     else:
         status = (f"Tap the button below to join!\n\n"
                   f"⏳ Joining time: {s.minutes} min\n\n")
-    return f"{head}{status}👥 Players ({len(s.players)}):\n{plist}"
+    return f"{head}{status}👥 Players: {len(s.players)}"
 
 
 def join_kb(s: Session) -> InlineKeyboardMarkup:
@@ -266,6 +271,79 @@ async def on_delay(m: Message, state: FSMContext, bot: Bot) -> None:
                    f"Joining: {minutes} min, round delay: {delay}s.")
 
 
+# --- Test simulation (private chat, fake players) ----------------------------
+
+@router.message(Command("sim"), F.chat.type == ChatType.PRIVATE)
+async def cmd_sim(m: Message, state: FSMContext) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer(PRIVATE_ONLY)
+        return
+    await start_sim(m, state)
+
+
+@router.callback_query(F.data == "sim", F.message.chat.type == ChatType.PRIVATE)
+async def cb_sim(c: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner(c.from_user.id):
+        await c.answer(PRIVATE_ONLY, show_alert=True)
+        return
+    await c.answer()
+    await start_sim(c.message, state)
+
+
+async def start_sim(msg: Message, state: FSMContext) -> None:
+    await state.set_state(Sim.entering_count)
+    await msg.answer(
+        "🧪 <b>Test simulation</b>\n\n"
+        f"How many fake players? Send a number (2–{SIM_MAX_PLAYERS}).\n"
+        "They'll be named «Player 1», «Player 2», etc."
+    )
+
+
+@router.message(Sim.entering_count, F.chat.type == ChatType.PRIVATE)
+async def on_sim_count(m: Message, state: FSMContext) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer(PRIVATE_ONLY)
+        return
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        await m.answer("Please send a whole number, e.g. 20")
+        return
+    count = int(txt)
+    if not (2 <= count <= SIM_MAX_PLAYERS):
+        await m.answer(f"Enter a number from 2 to {SIM_MAX_PLAYERS}.")
+        return
+    await state.update_data(count=count)
+    await state.set_state(Sim.entering_delay)
+    await m.answer(
+        f"Players: {count} ✅\n\n"
+        f"Delay between rounds, in seconds (0–{config.MAX_DELAY})."
+    )
+
+
+@router.message(Sim.entering_delay, F.chat.type == ChatType.PRIVATE)
+async def on_sim_delay(m: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer(PRIVATE_ONLY)
+        return
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        await m.answer("Please send a whole number of seconds, e.g. 2")
+        return
+    delay = int(txt)
+    if not (0 <= delay <= config.MAX_DELAY):
+        await m.answer(f"Enter a number from 0 to {config.MAX_DELAY}.")
+        return
+    data = await state.get_data()
+    count = data["count"]
+    await state.clear()
+
+    await m.answer(f"🧪 Simulating a game with {count} players...")
+    players = [Player(user_id=i, name=f"Player {i}") for i in range(1, count + 1)]
+    rng = random.Random()
+    result = run_game(players, rng, GameConfig())
+    await narrate(bot, m.chat.id, players, result, rng, delay)
+
+
 # --- Group interactions ------------------------------------------------------
 
 @router.callback_query(F.data == "join")
@@ -337,34 +415,39 @@ async def run_and_narrate(bot: Bot, s: Session) -> None:
     rng = random.Random()
     players = list(s.players.values())
     result = run_game(players, rng, GameConfig())
-    by_id = {p.user_id: p for p in players}
 
     await safe_edit(bot, s.chat_id, s.message_id, join_text(s, finished=True), None)
     await asyncio.sleep(1.5)
 
-    for i, rnd in enumerate(result.rounds, 1):
-        lines = [texts.render_event(ev, by_id, rng) for ev in rnd.events]
-        body = "\n".join(ln for ln in lines if ln)
-        text = f"🩸 <b>Round {i}</b> · alive: {rnd.alive_after}\n\n{body}"
-        await send_safe(bot, s.chat_id, text)
-        if s.round_delay > 0:
-            await asyncio.sleep(s.round_delay)
-
-    winner = by_id.get(result.winner_id)
-    if winner:
-        await send_safe(bot, s.chat_id,
-                        f"🏆 <b>Winner:</b> {texts.tag(winner)}!\n\nCongratulations! 🎉🎉🎉")
-
-    stats = texts.stats_text(players, result)
-    await send_safe(bot, s.chat_id, stats)
+    await narrate(bot, s.chat_id, players, result, rng, s.round_delay)
 
     # Copy of the stats to the owner's private chat.
     try:
+        stats = texts.stats_text(players, result)
         await bot.send_message(
             s.admin_id,
             f"📊 Results of the game in «{texts.esc(s.chat_title)}»:\n\n{stats}")
     except TelegramBadRequest:
         pass
+
+
+async def narrate(bot: Bot, chat_id: int, players: list[Player],
+                  result, rng: random.Random, delay: float) -> None:
+    """Send the battle round by round to a chat (real group or owner's DM)."""
+    by_id = {p.user_id: p for p in players}
+    for i, rnd in enumerate(result.rounds, 1):
+        lines = [texts.render_event(ev, by_id, rng) for ev in rnd.events]
+        body = "\n".join(ln for ln in lines if ln)
+        text = f"🩸 <b>Round {i}</b> · alive: {rnd.alive_after}\n\n{body}"
+        await send_safe(bot, chat_id, text)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    winner = by_id.get(result.winner_id)
+    if winner:
+        await send_safe(bot, chat_id,
+                        f"🏆 <b>Winner:</b> {texts.tag(winner)}!\n\nCongratulations! 🎉🎉🎉")
+    await send_safe(bot, chat_id, texts.stats_text(players, result))
 
 
 # --- Helpers -----------------------------------------------------------------

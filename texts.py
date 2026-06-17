@@ -100,13 +100,12 @@ def stats_text(players: list[Player], result: GameResult) -> str:
         key=lambda p: (p.user_id != result.winner_id, -p.kills, p.name.lower()),
     )
     medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, p in enumerate(ranking):
-        prefix = medals[i] if i < 3 else f"{i + 1}."
-        lines.append(f"{prefix} {plain(p)} — kills: {p.kills}")
+    lines = [f"{medals[i]} {plain(p)} — kills: {p.kills}"
+             for i, p in enumerate(ranking[:3])]
     header = (
         "📊 <b>Game stats</b>\n"
         f"👥 Players: {len(players)}\n"
         f"🔁 Rounds: {result.total_rounds}\n\n"
+        "<b>Top 3:</b>\n"
     )
     return header + "\n".join(lines)

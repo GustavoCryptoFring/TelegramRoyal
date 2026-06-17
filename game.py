@@ -78,7 +78,8 @@ def _simulate_round(players: list[Player], rng: random.Random, cfg: GameConfig) 
 
     alive = [p for p in players if p.alive]
     # How many die this round (always >= 1 so the game progresses, never all).
-    max_deaths = max(1, len(alive) // 3)
+    # ~1/5 of the living can fall in a round, so games run a bit longer.
+    max_deaths = max(1, len(alive) // 5)
     n_deaths = min(rng.randint(1, max_deaths), len(alive) - 1)
 
     for _ in range(n_deaths):
