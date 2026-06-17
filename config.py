@@ -20,3 +20,5 @@ ROUND_DELAY = float(os.environ.get("ROUND_DELAY", "3"))
 MIN_PLAYERS = int(os.environ.get("MIN_PLAYERS", "2"))
 # Max allowed join-phase length in minutes.
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "1440"))
+# Max allowed delay between rounds, in seconds.
+MAX_DELAY = int(os.environ.get("MAX_DELAY", "30"))

@@ -1,12 +1,13 @@
 """Rumble-royale style Telegram bot (aiogram 3).
 
 Flow:
-  1. Admin opens a private chat with the bot and sends /start.
+  1. Owner opens a private chat with the bot and sends /start.
   2. Bot lists groups where it is a member AND the user is an admin.
-  3. Admin picks a group, then sends the number of minutes for the join phase.
-  4. Bot posts an announcement + "Участвовать" button in the group.
+  3. Owner picks a group, sets the join time (minutes) and the delay between
+     rounds (seconds).
+  4. Bot posts an announcement + "Join" button in the group.
   5. When the timer ends, the battle is simulated and narrated round by round.
-  6. Final stats are sent to the group and to the admin's private chat.
+  6. Final stats are sent to the group and to the owner's private chat.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ router = Router()
 
 PRESENT = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
 ADMINS = {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+PRIVATE_ONLY = "🔒 This is a private bot."
 
 
 # --- Game session state (in memory; one active game per chat) ----------------
@@ -46,6 +48,7 @@ class Session:
     chat_title: str
     admin_id: int
     minutes: int
+    round_delay: float = 3.0
     message_id: int | None = None
     players: dict[int, Player] = field(default_factory=dict)
     open: bool = True
@@ -58,46 +61,47 @@ games: dict[int, Session] = {}
 class NewGame(StatesGroup):
     choosing_chat = State()
     entering_minutes = State()
+    entering_delay = State()
 
 
 # --- UI text / keyboards -----------------------------------------------------
 
 def welcome_text() -> str:
     return (
-        "👋 Привет! Это бот для битвы в стиле <b>Rumble Royale</b>.\n\n"
-        "Как запустить игру:\n"
-        "1. Добавь меня в свою группу (и желательно сделай админом, чтобы я мог писать).\n"
-        "2. Нажми «🎮 Новая игра» ниже.\n"
-        "3. Выбери чат и укажи, на сколько минут открыть сбор игроков.\n\n"
-        "Я опубликую в чате сообщение с кнопкой «Участвовать», а по таймеру "
-        "начнётся бой. Итоги пришлю в чат и тебе в личку."
+        "👋 Hi! This is a <b>Rumble Royale</b> style battle bot.\n\n"
+        "How to start a game:\n"
+        "1. Add me to your group (and ideally make me an admin so I can post).\n"
+        "2. Tap «🎮 New game» below.\n"
+        "3. Pick a chat, set the join time and the delay between rounds.\n\n"
+        "I'll post a message with a «Join» button in the chat, and the battle "
+        "starts when the timer ends. Results go to the chat and to your DM."
     )
 
 
 def kb_newgame() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Новая игра", callback_data="newgame")]
+        [InlineKeyboardButton(text="🎮 New game", callback_data="newgame")]
     ])
 
 
 def join_text(s: Session, finished: bool = False) -> str:
     if s.players:
-        plist = "\n".join(f"• {texts.mention(p)}" for p in s.players.values())
+        plist = "\n".join(f"• {texts.plain(p)}" for p in s.players.values())
     else:
-        plist = "<i>Пока никто не присоединился.</i>"
+        plist = "<i>No one has joined yet.</i>"
     head = "⚔️ <b>RUMBLE ROYALE</b> ⚔️\n\n"
     if finished:
-        status = "🔒 Сбор завершён! Битва начинается...\n\n"
+        status = "🔒 Joining closed! The battle begins...\n\n"
     else:
-        status = (f"Жми кнопку ниже, чтобы участвовать!\n\n"
-                  f"⏳ Сбор игроков: {s.minutes} мин\n\n")
-    return f"{head}{status}👥 Участники ({len(s.players)}):\n{plist}"
+        status = (f"Tap the button below to join!\n\n"
+                  f"⏳ Joining time: {s.minutes} min\n\n")
+    return f"{head}{status}👥 Players ({len(s.players)}):\n{plist}"
 
 
 def join_kb(s: Session) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⚔️ Участвовать ({len(s.players)})", callback_data="join")],
-        [InlineKeyboardButton(text="❌ Отмена (для админов)", callback_data="cancel")],
+        [InlineKeyboardButton(text=f"⚔️ Join ({len(s.players)})", callback_data="join")],
+        [InlineKeyboardButton(text="❌ Cancel (admins)", callback_data="cancel")],
     ])
 
 
@@ -118,7 +122,7 @@ async def on_my_chat_member(ev: ChatMemberUpdated) -> None:
         logging.info("Removed chat %s", chat.id)
 
 
-# --- Admin flow (private chat) -----------------------------------------------
+# --- Owner control (private chat) --------------------------------------------
 
 def is_owner(user_id: int) -> bool:
     """Owner-only control. If OWNER_ID is unset (0), the bot is open (so you
@@ -129,21 +133,21 @@ def is_owner(user_id: int) -> bool:
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(m: Message, state: FSMContext) -> None:
     if not is_owner(m.from_user.id):
-        await m.answer("🔒 Это приватный бот.")
+        await m.answer(PRIVATE_ONLY)
         return
     await state.clear()
     text = welcome_text()
     if config.OWNER_ID == 0:
-        text += (f"\n\n🔑 Твой ID: <code>{m.from_user.id}</code>\n"
-                 f"Чтобы бот отвечал только тебе, добавь "
-                 f"<code>OWNER_ID={m.from_user.id}</code> в файл .env и перезапусти бота.")
+        text += (f"\n\n🔑 Your ID: <code>{m.from_user.id}</code>\n"
+                 f"To make the bot respond only to you, add "
+                 f"<code>OWNER_ID={m.from_user.id}</code> to your .env file and restart the bot.")
     await m.answer(text, reply_markup=kb_newgame())
 
 
 @router.message(Command("newgame"), F.chat.type == ChatType.PRIVATE)
 async def cmd_newgame(m: Message, state: FSMContext, bot: Bot) -> None:
     if not is_owner(m.from_user.id):
-        await m.answer("🔒 Это приватный бот.")
+        await m.answer(PRIVATE_ONLY)
         return
     await show_chat_picker(bot, m.from_user.id, m, state)
 
@@ -151,7 +155,7 @@ async def cmd_newgame(m: Message, state: FSMContext, bot: Bot) -> None:
 @router.callback_query(F.data == "newgame", F.message.chat.type == ChatType.PRIVATE)
 async def cb_newgame(c: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_owner(c.from_user.id):
-        await c.answer("🔒 Это приватный бот.", show_alert=True)
+        await c.answer(PRIVATE_ONLY, show_alert=True)
         return
     await c.answer()
     await show_chat_picker(bot, c.from_user.id, c.message, state)
@@ -170,70 +174,96 @@ async def show_chat_picker(bot: Bot, user_id: int, msg: Message, state: FSMConte
 
     if not eligible:
         await msg.answer(
-            "Не нашёл подходящих групп 🤔\n\n"
-            "Убедись, что: 1) бот добавлен в группу; 2) ты администратор этой группы. "
-            "После этого снова нажми «Новая игра»."
+            "No eligible groups found 🤔\n\n"
+            "Make sure: 1) the bot is added to a group; 2) you're an admin of that group. "
+            "Then tap «New game» again."
         )
         await state.clear()
         return
 
     rows = [[InlineKeyboardButton(text=title, callback_data=f"pick:{cid}")]
             for cid, title in eligible]
-    await msg.answer("Выбери чат для игры:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await msg.answer("Pick a chat for the game:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await state.set_state(NewGame.choosing_chat)
 
 
 @router.callback_query(F.data.startswith("pick:"), NewGame.choosing_chat)
 async def cb_pick(c: CallbackQuery, state: FSMContext) -> None:
     if not is_owner(c.from_user.id):
-        await c.answer("🔒 Это приватный бот.", show_alert=True)
+        await c.answer(PRIVATE_ONLY, show_alert=True)
         return
     chat_id = int(c.data.split(":", 1)[1])
     if chat_id in games:
-        await c.answer("В этом чате уже идёт игра.", show_alert=True)
+        await c.answer("A game is already running in this chat.", show_alert=True)
         return
     title = db.get_title(config.DB_PATH, chat_id) or str(chat_id)
     await state.update_data(chat_id=chat_id, chat_title=title)
     await state.set_state(NewGame.entering_minutes)
     await c.message.edit_text(
-        f"Чат: <b>{texts.esc(title)}</b>\n\n"
-        f"На сколько минут открыть сбор игроков? "
-        f"Отправь число (1–{config.MAX_MINUTES})."
+        f"Chat: <b>{texts.esc(title)}</b>\n\n"
+        f"How many minutes to keep joining open? "
+        f"Send a number (1–{config.MAX_MINUTES})."
     )
     await c.answer()
 
 
 @router.message(NewGame.entering_minutes, F.chat.type == ChatType.PRIVATE)
-async def on_minutes(m: Message, state: FSMContext, bot: Bot) -> None:
+async def on_minutes(m: Message, state: FSMContext) -> None:
     if not is_owner(m.from_user.id):
-        await m.answer("🔒 Это приватный бот.")
+        await m.answer(PRIVATE_ONLY)
         return
     txt = (m.text or "").strip()
     if not txt.isdigit():
-        await m.answer("Нужно целое число минут, например: 5")
+        await m.answer("Please send a whole number of minutes, e.g. 5")
         return
     minutes = int(txt)
     if not (1 <= minutes <= config.MAX_MINUTES):
-        await m.answer(f"Введи число от 1 до {config.MAX_MINUTES}.")
+        await m.answer(f"Enter a number from 1 to {config.MAX_MINUTES}.")
+        return
+
+    await state.update_data(minutes=minutes)
+    await state.set_state(NewGame.entering_delay)
+    await m.answer(
+        f"Joining time: {minutes} min ✅\n\n"
+        f"Now the delay between rounds, in seconds. "
+        f"Send a number (0–{config.MAX_DELAY}). "
+        f"Bigger = more suspense, 0 = instant."
+    )
+
+
+@router.message(NewGame.entering_delay, F.chat.type == ChatType.PRIVATE)
+async def on_delay(m: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_owner(m.from_user.id):
+        await m.answer(PRIVATE_ONLY)
+        return
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        await m.answer("Please send a whole number of seconds, e.g. 3")
+        return
+    delay = int(txt)
+    if not (0 <= delay <= config.MAX_DELAY):
+        await m.answer(f"Enter a number from 0 to {config.MAX_DELAY}.")
         return
 
     data = await state.get_data()
-    chat_id, title = data["chat_id"], data["chat_title"]
+    chat_id, title, minutes = data["chat_id"], data["chat_title"], data["minutes"]
     await state.clear()
 
     if chat_id in games:
-        await m.answer("В этом чате уже идёт игра.")
+        await m.answer("A game is already running in this chat.")
         return
 
     try:
-        await launch_game(bot, chat_id, title, m.from_user.id, minutes)
+        await launch_game(bot, chat_id, title, m.from_user.id, minutes, delay)
     except TelegramBadRequest as e:
         games.pop(chat_id, None)
-        await m.answer(f"Не удалось написать в чат «{texts.esc(title)}». "
-                       f"Проверь, что бот там состоит и может отправлять сообщения.\n\n<code>{texts.esc(str(e))}</code>")
+        await m.answer(f"Couldn't post in «{texts.esc(title)}». "
+                       f"Make sure the bot is in that chat and can send messages.\n\n"
+                       f"<code>{texts.esc(str(e))}</code>")
         return
 
-    await m.answer(f"✅ Игра запущена в «{texts.esc(title)}». Сбор игроков: {minutes} мин.")
+    await m.answer(f"✅ Game launched in «{texts.esc(title)}». "
+                   f"Joining: {minutes} min, round delay: {delay}s.")
 
 
 # --- Group interactions ------------------------------------------------------
@@ -242,14 +272,14 @@ async def on_minutes(m: Message, state: FSMContext, bot: Bot) -> None:
 async def cb_join(c: CallbackQuery, bot: Bot) -> None:
     s = games.get(c.message.chat.id)
     if not s or not s.open:
-        await c.answer("Сейчас присоединиться нельзя.", show_alert=True)
+        await c.answer("Joining is closed right now.", show_alert=True)
         return
     uid = c.from_user.id
     if uid in s.players:
-        await c.answer("Ты уже в игре! ⚔️")
+        await c.answer("You're already in! ⚔️")
         return
     s.players[uid] = Player(user_id=uid, name=c.from_user.full_name)
-    await c.answer("Ты в игре! ⚔️")
+    await c.answer("You're in! ⚔️")
     await refresh_join_message(bot, s)
 
 
@@ -257,23 +287,25 @@ async def cb_join(c: CallbackQuery, bot: Bot) -> None:
 async def cb_cancel(c: CallbackQuery, bot: Bot) -> None:
     s = games.get(c.message.chat.id)
     if not s:
-        await c.answer("Активной игры нет.", show_alert=True)
+        await c.answer("No active game.", show_alert=True)
         return
     member = await bot.get_chat_member(s.chat_id, c.from_user.id)
     if c.from_user.id != s.admin_id and member.status not in ADMINS:
-        await c.answer("Отменить может только администратор.", show_alert=True)
+        await c.answer("Only an admin can cancel.", show_alert=True)
         return
-    await c.answer("Игра отменена.")
+    await c.answer("Game cancelled.")
     if s.task:
         s.task.cancel()
     games.pop(s.chat_id, None)
-    await safe_edit(bot, s.chat_id, s.message_id, "❌ Игра отменена администратором.", None)
+    await safe_edit(bot, s.chat_id, s.message_id, "❌ Game cancelled by an admin.", None)
 
 
 # --- Engine wiring -----------------------------------------------------------
 
-async def launch_game(bot: Bot, chat_id: int, title: str, admin_id: int, minutes: int) -> None:
-    s = Session(chat_id=chat_id, chat_title=title, admin_id=admin_id, minutes=minutes)
+async def launch_game(bot: Bot, chat_id: int, title: str, admin_id: int,
+                      minutes: int, round_delay: float) -> None:
+    s = Session(chat_id=chat_id, chat_title=title, admin_id=admin_id,
+                minutes=minutes, round_delay=round_delay)
     games[chat_id] = s
     msg = await bot.send_message(chat_id, join_text(s), reply_markup=join_kb(s))
     s.message_id = msg.message_id
@@ -290,7 +322,7 @@ async def game_timer(bot: Bot, s: Session) -> None:
     if len(s.players) < config.MIN_PLAYERS:
         games.pop(s.chat_id, None)
         await safe_edit(bot, s.chat_id, s.message_id,
-                        f"😴 Недостаточно игроков (нужно минимум {config.MIN_PLAYERS}). Игра отменена.", None)
+                        f"😴 Not enough players (need at least {config.MIN_PLAYERS}). Game cancelled.", None)
         return
 
     try:
@@ -313,23 +345,24 @@ async def run_and_narrate(bot: Bot, s: Session) -> None:
     for i, rnd in enumerate(result.rounds, 1):
         lines = [texts.render_event(ev, by_id, rng) for ev in rnd.events]
         body = "\n".join(ln for ln in lines if ln)
-        text = f"🩸 <b>Раунд {i}</b> · в живых: {rnd.alive_after}\n\n{body}"
+        text = f"🩸 <b>Round {i}</b> · alive: {rnd.alive_after}\n\n{body}"
         await send_safe(bot, s.chat_id, text)
-        await asyncio.sleep(config.ROUND_DELAY)
+        if s.round_delay > 0:
+            await asyncio.sleep(s.round_delay)
 
     winner = by_id.get(result.winner_id)
     if winner:
         await send_safe(bot, s.chat_id,
-                        f"🏆 <b>Победитель:</b> {texts.mention(winner)}!\n\nПоздравляем! 🎉🎉🎉")
+                        f"🏆 <b>Winner:</b> {texts.tag(winner)}!\n\nCongratulations! 🎉🎉🎉")
 
     stats = texts.stats_text(players, result)
     await send_safe(bot, s.chat_id, stats)
 
-    # Copy of the stats to the admin's private chat.
+    # Copy of the stats to the owner's private chat.
     try:
         await bot.send_message(
             s.admin_id,
-            f"📊 Итоги игры в «{texts.esc(s.chat_title)}»:\n\n{stats}")
+            f"📊 Results of the game in «{texts.esc(s.chat_title)}»:\n\n{stats}")
     except TelegramBadRequest:
         pass
 
@@ -367,7 +400,7 @@ async def send_safe(bot: Bot, chat_id: int, text: str) -> None:
 
 async def main() -> None:
     if not config.BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN не задан. Укажи его в переменной окружения или в .env")
+        raise SystemExit("BOT_TOKEN is not set. Provide it via env var or .env")
     db.init_db(config.DB_PATH)
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
