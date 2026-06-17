@@ -18,9 +18,10 @@ class GameConfig:
     accident_chance: float = 0.15      # chance a death is an "accident" (no killer)
     double_kill_chance: float = 0.12   # chance a kill becomes a double kill
     revive_chance: float = 0.08        # chance a dead player is revived in a round
-    death_fraction: float = 0.30       # ~30% of the living fall each round (avg)
+    death_strength: float = 1.0        # deaths/round scale ~ strength * sqrt(alive)
     deaths_cap: int = 12               # never more than this many deaths per round
-    flavor_max: int = 3                # up to this many harmless events per round
+    target_events: int = 5             # aim for ~this many lines per round
+    flavor_max: int = 4                # hard ceiling on harmless events per round
 
 
 # ---- Structured events -----------------------------------------------------
@@ -81,10 +82,9 @@ def _simulate_round(players: list[Player], rng: random.Random, cfg: GameConfig) 
         events.append(ReviveEvent(revived.user_id))
 
     alive = [p for p in players if p.alive]
-    # Deaths this round: ~death_fraction of the living (with some jitter),
-    # capped, always >= 1 and never everyone.
-    base = len(alive) * cfg.death_fraction
-    n_deaths = max(1, round(base * rng.uniform(0.7, 1.3)))
+    # Deaths this round scale with sqrt(alive): more early, fewer late, but the
+    # drop is gentle so rounds stay roughly the same size.
+    n_deaths = max(1, round(cfg.death_strength * (len(alive) ** 0.5) * rng.uniform(0.8, 1.2)))
     n_deaths = min(n_deaths, cfg.deaths_cap, len(alive) - 1)
 
     for _ in range(n_deaths):
@@ -113,12 +113,17 @@ def _simulate_round(players: list[Player], rng: random.Random, cfg: GameConfig) 
             killer.kills += 1
             events.append(KillEvent(killer.user_id, victim.user_id))
 
-    # Harmless flavor events for survivors (skip when the game is over).
+    # Pad with harmless flavor events so each round has ~target_events lines:
+    # early rounds (already full of deaths) get little/no flavor, late rounds get
+    # more. Skipped when the game is over (only the winner remains).
     survivors = [p for p in players if p.alive]
-    if len(survivors) >= 2 and cfg.flavor_max > 0:
-        n_flavor = min(len(survivors), rng.randint(1, cfg.flavor_max))
-        for p in rng.sample(survivors, n_flavor):
-            events.append(FlavorEvent(p.user_id))
+    if len(survivors) >= 2:
+        need = max(0, cfg.target_events - len(events))
+        n_flavor = min(need, len(survivors), cfg.flavor_max)
+        if n_flavor > 0:
+            n_flavor = rng.randint(max(0, n_flavor - 1), n_flavor)
+            for p in rng.sample(survivors, n_flavor):
+                events.append(FlavorEvent(p.user_id))
 
     rng.shuffle(events)
     return events
